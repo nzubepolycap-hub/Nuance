@@ -44,6 +44,14 @@
 import { createClient, chains } from "genlayer-js";
 import { transactionsStatusNumberToName, type TransactionHash, type TransactionStatus, type TransactionResult as TxResultEnum } from "genlayer-js/types";
 import { bucketFromStatusName, isSuccessfulResult, LEGACY_OFFCHAIN, type ChainStatus } from "../lib/chain-status";
+import { setDefaultResultOrder } from "node:dns";
+
+// See scripts/genlayer-deploy-core.ts's own copy of this exact line for
+// the full account of why — this file doesn't import that module, so it
+// needs its own. Same fix, same confirmed-live failure mode (this
+// environment has no IPv6 route to Bradbury's RPC host at all), applied
+// to the indexer's own read path specifically.
+setDefaultResultOrder("ipv4first");
 
 interface ReadRequest {
   id: string;

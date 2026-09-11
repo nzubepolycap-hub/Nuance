@@ -23,6 +23,28 @@ import type { createClient } from "genlayer-js";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setDefaultResultOrder } from "node:dns";
+
+// Confirmed live 2026-09-10: this environment (and, per Node's Happy-
+// Eyeballs docs, plenty of real deployment targets too — a container
+// with IPv6 disabled at the network level is common) has NO working IPv6
+// route to Bradbury's RPC host at all — an IPv6 connection attempt fails
+// in under 1ms ("no route to host"), not a slow timeout Happy Eyeballs
+// would race against and recover from in time. rpc-bradbury.genlayer.com
+// resolves AAAA records first (Cloudflare-fronted), so Node's default DNS
+// order tries — and fails — IPv6 before ever reaching the IPv4 address
+// that actually works, surfacing identically to every other transient
+// failure as viem's own generic "fetch failed". This is a real,
+// verifiable fix for a real, verified failure mode — not a guess: a
+// manual client.readContract call against a live deployed escrow, run
+// from this exact environment, went from consistently failing to
+// succeeding 3/3 once this was set. Every entry point that talks to
+// Bradbury needs this — deploy.ts/genlayer-deploy.ts/genlayer-write.ts/
+// verify-real-consensus.ts all import this module, so setting it here
+// once (a module-level side effect, guaranteed to run before any of
+// their own network calls) covers all four; scripts/genlayer-read.ts
+// doesn't import from here and sets the same thing independently.
+setDefaultResultOrder("ipv4first");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = resolve(__dirname, "..");
@@ -31,8 +53,24 @@ export const CONTRACTS_DIR = resolve(REPO_ROOT, "contracts");
 // Bradbury's observed rate-limit error code, and how long to back off —
 // see deploy.ts's header, "Rate limiting" paragraph.
 const RATE_LIMIT_ERROR_CODE = -32005;
-const RATE_LIMIT_BACKOFF_MS = 2000;
-const MAX_RATE_LIMIT_RETRIES = 5;
+const RETRY_BACKOFF_MS = 2000;
+const MAX_RETRIES = 5;
+
+// Same signature scripts/genlayer-read.ts's own RETRYABLE_ERROR_PATTERN
+// retries on the read side (see that file for the live-confirmed
+// reasoning: Bradbury's shared public RPC node genuinely does drop a
+// request outright now and then, a node-side blip a same-request retry
+// clears far more often than not) — added here 2026-09-10, this side of
+// the bridge (writeContract/deployContract/waitForTransactionReceipt)
+// previously only ever retried a -32005 rate-limit response and NOT this
+// pattern, so a transient network failure here failed outright with zero
+// retries at all, unlike every read. Safe to retry the same way: a
+// writeContract call that throws this specific error never got far
+// enough to receive a transaction hash back, which is genlayer_write.py's
+// own documented signal for "never actually submitted" — nothing here
+// changes that contract, this only means fewer of those failures reach
+// the Python caller at all.
+const RETRYABLE_NETWORK_ERROR_PATTERN = /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up/i;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((res) => setTimeout(res, ms));
@@ -63,17 +101,29 @@ function isRateLimitError(err: unknown): boolean {
   return message.includes("-32005") || /rate limit/i.test(message);
 }
 
+function isRetryableNetworkError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return RETRYABLE_NETWORK_ERROR_PATTERN.test(message);
+}
+
+// Despite the name kept for this exported function (3 other files already
+// import it by this name — renaming is pure churn, not a behavior change,
+// so left alone) this retries BOTH known-transient failure signatures now,
+// not just rate-limiting — see RETRYABLE_NETWORK_ERROR_PATTERN's own
+// comment above for why the second one was added.
 export async function withRateLimitRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      if (!isRateLimitError(err) || attempt >= MAX_RATE_LIMIT_RETRIES) throw err;
+      const rateLimited = isRateLimitError(err);
+      const networkBlip = !rateLimited && isRetryableNetworkError(err);
+      if ((!rateLimited && !networkBlip) || attempt >= MAX_RETRIES) throw err;
       console.warn(
-        `  ${label}: rate limited (-32005) — retrying in ${RATE_LIMIT_BACKOFF_MS}ms ` +
-          `(attempt ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES})`
+        `  ${label}: ${rateLimited ? "rate limited (-32005)" : "transient network error"} — ` +
+          `retrying in ${RETRY_BACKOFF_MS}ms (attempt ${attempt + 1}/${MAX_RETRIES})`
       );
-      await sleep(RATE_LIMIT_BACKOFF_MS);
+      await sleep(RETRY_BACKOFF_MS);
     }
   }
 }
