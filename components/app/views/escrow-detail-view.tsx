@@ -188,7 +188,7 @@ export function EscrowDetailView({
             </span>{" "}
             · Total{" "}
             <span className="font-semibold text-fg">
-              {escrow.total.toLocaleString()} GEN
+              {escrow.total.toLocaleString()} {escrow.asset.symbol}
             </span>
           </div>
         </div>
@@ -215,7 +215,7 @@ export function EscrowDetailView({
                 Escrow contract deployed — awaiting funding
               </div>
               <div className="mt-1 text-xs text-fg-meta">
-                Send {escrow.total.toLocaleString()} GEN from your wallet into this
+                Send {escrow.total.toLocaleString()} {escrow.asset.symbol} from your wallet into this
                 escrow&rsquo;s contract before any milestone can be released.
               </div>
             </div>
@@ -225,7 +225,9 @@ export function EscrowDetailView({
                 disabled={fundingDisabled}
                 className="cursor-pointer rounded-lg border border-review/40 bg-review/20 px-4 py-2.5 text-[13px] font-semibold text-review-text transition-colors hover:bg-review/30 disabled:cursor-default disabled:opacity-60"
               >
-                {fundingDisabled ? "Waiting for wallet…" : `Fund Escrow (${escrow.total.toLocaleString()} GEN)`}
+                {fundingDisabled
+                  ? "Waiting for wallet…"
+                  : `Fund Escrow (${escrow.total.toLocaleString()} ${escrow.asset.symbol})`}
               </button>
             )}
           </div>

@@ -1,17 +1,22 @@
 """Prediction markets router — GET /predictions, GET /predictions/{id}, POST /predictions/{id}/bet.
 
-Row locking (ROADMAP.md Part 3 5.4): `place_bet` reads `status_key`/
-`resolution_date` then writes a new position + `volume` — without a lock,
-a bet can land concurrently with `resolve_prediction_market` (services/
-prediction_oracle.py) acting on stale "still open" state, landing a bet
-the resolution decision never accounted for. `_get_prediction_for_update_
-or_404`'s `SELECT ... FOR UPDATE` closes this the same way routers/
-escrows.py/disputes.py/governance.py's equivalents do — prediction_oracle.
-py's own fetch inside resolve_prediction_market takes the same lock on
-its side, so the two paths actually serialize against each other despite
-living in different modules/sessions (a Postgres row lock doesn't care
-which code acquired it, only that it's the same row). A no-op on SQLite,
-a real lock on Postgres.
+Row locking (ROADMAP.md Part 3 5.4): `place_bet`/`place_bet_on_chain` read
+`status_key`/`resolution_date` then write a new position + `volume` —
+without a lock, a bet can land concurrently with `resolve_prediction_
+market` (services/prediction_oracle.py) acting on stale "still open"
+state, landing a bet the resolution decision never accounted for.
+`_get_prediction_for_update_or_404`'s `SELECT ... FOR UPDATE` closes this
+the same way routers/escrows.py/disputes.py/governance.py's equivalents
+do — prediction_oracle.py's own fetch inside resolve_prediction_market
+takes the same lock on its side, so the two paths actually serialize
+against each other despite living in different modules/sessions (a
+Postgres row lock doesn't care which code acquired it, only that it's the
+same row). A no-op on SQLite, a real lock on Postgres.
+
+Both write endpoints also share `_assert_market_open_for_betting` — a bet
+must land on a market that's still open and before its own deadline,
+on-chain or off (see that function's own docstring for the real bug this
+closed on the on-chain path specifically).
 """
 
 from __future__ import annotations
@@ -47,10 +52,10 @@ async def _get_prediction_or_404(prediction_id: int, db: AsyncSession) -> Predic
 
 async def _get_prediction_for_update_or_404(prediction_id: int, db: AsyncSession) -> Prediction:
     """Same as _get_prediction_or_404, but holds a row lock for the rest
-    of this transaction — use for place_bet specifically (see module
-    docstring). Never use for a plain read (list_predictions/
-    get_prediction) — locking rows a GET request has no intention of
-    writing to would only add contention.
+    of this transaction — use for place_bet/place_bet_on_chain
+    specifically (see module docstring). Never use for a plain read
+    (list_predictions/get_prediction) — locking rows a GET request has no
+    intention of writing to would only add contention.
     """
     result = await db.execute(
         select(Prediction)
@@ -64,6 +69,39 @@ async def _get_prediction_for_update_or_404(prediction_id: int, db: AsyncSession
             status_code=status.HTTP_404_NOT_FOUND, detail="Prediction market not found."
         )
     return prediction
+
+
+def _resolution_date_utc(prediction: Prediction) -> datetime:
+    """`Prediction.resolution_date` round-trips as naive on SQLite —
+    normalize to UTC-aware before comparing against `datetime.now(utc)`.
+    Shared by place_bet/place_bet_on_chain/resolve_prediction, which
+    each used to inline this same three-line snippet independently."""
+    return (
+        prediction.resolution_date
+        if prediction.resolution_date.tzinfo is not None
+        else prediction.resolution_date.replace(tzinfo=timezone.utc)
+    )
+
+
+def _assert_market_open_for_betting(prediction: Prediction) -> None:
+    """Shared by place_bet and place_bet_on_chain — a bet, on-chain or
+    off, must land on a market that's still actually open and before its
+    own cutoff. Found missing from place_bet_on_chain during a security
+    review (2026-09-09): that endpoint accepted a bet on any on-chain-
+    linked market regardless of status/deadline, letting a fabricated
+    position skew services/payout.py::calculate_prediction_payouts'
+    pari-mutuel math for every other real bettor once the market
+    resolved. See ROADMAP.md/RUNBOOK.md for the full account."""
+    if prediction.status_key.lower() != "open":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Prediction market is not open for betting.",
+        )
+    if datetime.now(timezone.utc) >= _resolution_date_utc(prediction):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Betting has closed for this market",
+        )
 
 
 @router.get("", response_model=list[PredictionRead])
@@ -110,24 +148,7 @@ async def place_bet(
     current_user: User = Depends(require_user_with_scope("bet:place")),
 ) -> Prediction:
     prediction = await _get_prediction_for_update_or_404(prediction_id, db)
-
-    if prediction.status_key.lower() != "open":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Prediction market is not open for betting.",
-        )
-
-    now = datetime.now(timezone.utc)
-    res_date = (
-        prediction.resolution_date
-        if prediction.resolution_date.tzinfo is not None
-        else prediction.resolution_date.replace(tzinfo=timezone.utc)
-    )
-    if now >= res_date:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Betting has closed for this market",
-        )
+    _assert_market_open_for_betting(prediction)
 
     position = PredictionPosition(
         prediction_id=prediction.id,
@@ -164,14 +185,25 @@ async def place_bet_on_chain(
     positions" UI keeps working, since services/genlayer_indexer.py's
     view-sync doesn't track individual bettors' on-chain stakes today,
     only the market's own state/outcome as a whole.
+
+    FIXED 2026-09-10 — this used to skip the same open/deadline check
+    place_bet enforces, and read via the non-locking _get_prediction_
+    or_404: any signed-in wallet could mirror a fabricated position onto
+    a closed/resolved/past-deadline market (no real tx_hash verification
+    either way — see above), which then skewed services/payout.py's
+    pari-mutuel payout math for every other real bettor once the market
+    resolved. Now takes the same lock and the same guard as place_bet;
+    only the tx-hash-isn't-verified property (intentional, per this
+    docstring's own first paragraph) remains different between the two.
     """
-    prediction = await _get_prediction_or_404(prediction_id, db)
+    prediction = await _get_prediction_for_update_or_404(prediction_id, db)
     if prediction.contract_address is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="This market isn't linked to a deployed contract — use the "
             "off-chain POST /predictions/{id}/bet instead.",
         )
+    _assert_market_open_for_betting(prediction)
 
     position = PredictionPosition(
         prediction_id=prediction.id,
@@ -206,13 +238,7 @@ async def resolve_prediction(
             "this off-chain endpoint.",
         )
 
-    now = datetime.now(timezone.utc)
-    res_date = (
-        prediction.resolution_date
-        if prediction.resolution_date.tzinfo is not None
-        else prediction.resolution_date.replace(tzinfo=timezone.utc)
-    )
-    if now < res_date:
+    if datetime.now(timezone.utc) < _resolution_date_utc(prediction):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Market cannot be resolved before its resolution date: {prediction.resolution_date.isoformat()}",

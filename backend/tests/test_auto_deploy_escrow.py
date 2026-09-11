@@ -70,7 +70,12 @@ def _get_token(client: TestClient, wallet: Account) -> str:
 
 
 async def _create_escrow_row(
-    creator: str, counterparty: str, total: str, criteria: str, contract_address: str | None = None
+    creator: str,
+    counterparty: str,
+    total: str,
+    criteria: str,
+    contract_address: str | None = None,
+    asset_id: int = 1,
 ) -> int:
     async with AsyncSessionLocal() as db:
         for addr in (creator, counterparty):
@@ -81,6 +86,7 @@ async def _create_escrow_row(
             counterparty_address=counterparty,
             title="Auto-deploy test escrow",
             total=Decimal(total),
+            asset_id=asset_id,
             status_key=StatusKey.IN_PROGRESS,
             contract_address=contract_address,
         )
@@ -148,6 +154,42 @@ def test_deploy_escrow_contract_links_correctly(monkeypatch):
     # scripts/genlayer-deploy.ts at this magnitude.
     assert amount_arg == {"__bigint__": str(500 * 10**18)}  # 500.00 GEN -> wei
     assert criteria == "Ship the thing."
+
+
+def test_deploy_escrow_contract_skips_non_native_asset(monkeypatch):
+    """Regression test for a real fund-safety bug found 2026-09-10
+    (integration audit): this function used to have no idea ROADMAP.md
+    Part 4 6.2's Asset model existed — it would deploy a real on-chain
+    NuanceEscrow for a non-native-asset escrow (e.g. the seeded testnet
+    USDC, asset_id=2) using _gen_to_wei's fixed 18-decimal GEN
+    conversion, and NuanceEscrow.fund_escrow only ever accepts native
+    currency (gl.message.value) — there's no ERC-20 transfer path
+    anywhere in the contract or components/app/genlayer-write-client.ts.
+    Must stay off-chain (deploy_contract never even called) until this
+    contract actually supports a second settlement asset."""
+    escrow_id = asyncio.run(
+        _create_escrow_row(
+            "0x3333333333333333333333333333333333333333",
+            "0x4444444444444444444444444444444444444444",
+            "9000.00",
+            "Pay in USDC.",
+            asset_id=2,  # seeded testnet USDC — see app/db.py::_seed_assets
+        )
+    )
+
+    called = {"deploy_contract": False}
+
+    async def _fake_deploy_contract(file, args):
+        called["deploy_contract"] = True
+        return _FAKE_ADDRESS
+
+    monkeypatch.setattr(genlayer_deploy, "deploy_contract", _fake_deploy_contract)
+
+    asyncio.run(genlayer_deploy.deploy_escrow_contract(escrow_id))
+
+    assert called["deploy_contract"] is False
+    escrow = asyncio.run(_get_escrow(escrow_id))
+    assert escrow.contract_address is None
 
 
 def test_deploy_escrow_contract_failed_deploy_leaves_it_unlinked(monkeypatch):

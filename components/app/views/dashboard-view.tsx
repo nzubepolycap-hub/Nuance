@@ -11,7 +11,17 @@ export function DashboardView({
   onOpenCreate: () => void;
   onOpenEscrow: (id: number) => void;
 }) {
-  const totalEscrowed = escrows.reduce((s, e) => s + (Number(e.total) || 0), 0);
+  // Native-asset (GEN) escrows only — summing every escrow's `total`
+  // regardless of which Asset (ROADMAP.md Part 4 6.2) it's actually
+  // denominated in would silently blend e.g. testnet USDC amounts into a
+  // tile labeled "GEN". A genuinely correct multi-asset total would need
+  // a per-asset breakdown, not one blended number with no fixed unit —
+  // out of scope here; this just keeps the existing GEN-labeled tile
+  // honest about its own unit, same fix backend/app/routers/analytics.py
+  // and services/genlayer_deploy.py both needed for the same reason.
+  const totalEscrowed = escrows
+    .filter((e) => e.asset.isNative)
+    .reduce((s, e) => s + (Number(e.total) || 0), 0);
   const activeReviewCount = escrows.filter(
     (e) => e.statusKey === "in_review" || e.milestones.some((m) => m.statusKey === "in_review")
   ).length;
@@ -105,7 +115,7 @@ export function DashboardView({
                     <div className="font-brand-mono text-sm font-semibold">
                       {e.total.toLocaleString()}
                     </div>
-                    <div className="text-xs text-fg-meta">GEN</div>
+                    <div className="text-xs text-fg-meta">{e.asset.symbol}</div>
                   </div>
                   <StatusBadge status={e.statusKey} />
                 </div>

@@ -105,6 +105,31 @@ async def _seed() -> None:
         )
         db.add(escrow2)
 
+        # Escrow 3: open, unreleased milestone — but denominated in the
+        # seeded testnet USDC (asset_id=2, not native GEN, id=1). Must
+        # NOT count toward tvl_open_escrows_gen — regression coverage for
+        # a real bug found 2026-09-10 (integration audit): this endpoint
+        # used to sum every escrow's milestones regardless of asset,
+        # silently blending non-GEN amounts into a field named "_gen".
+        escrow3 = Escrow(
+            creator_address="0xaaaa000000000000000000000000000000aaaa",
+            counterparty_address="0xbbbb000000000000000000000000000000bbbb",
+            title="Escrow 3 (USDC)",
+            total=Decimal("9000.00"),
+            asset_id=2,
+            status_key=StatusKey.IN_PROGRESS,
+        )
+        escrow3.milestones.append(
+            Milestone(
+                name="Locked (USDC)",
+                amount=Decimal("9000.00"),
+                status_key=StatusKey.PENDING,
+                criteria="x",
+                order_index=0,
+            )
+        )
+        db.add(escrow3)
+
         await db.flush()
 
         # Two resolved disputes, 2h and 6h resolution times.
@@ -167,8 +192,10 @@ def test_analytics_overview_math(client):
 
     after = client.get("/analytics/overview").json()
 
-    # TVL: escrow1's unreleased 200.00 milestone only — the paid-out 100
-    # and the cancelled escrow's refunded 500 both excluded.
+    # TVL: escrow1's unreleased 200.00 milestone only — the paid-out 100,
+    # the cancelled escrow's refunded 500, and escrow3's 9000.00 USDC
+    # (denominated in a non-native asset — see _tvl_open_escrows' own
+    # docstring) are all excluded.
     tvl_delta = Decimal(after["tvl_open_escrows_gen"]) - Decimal(before["tvl_open_escrows_gen"])
     assert tvl_delta == Decimal("200.00")
     assert after["open_escrow_count"] - before["open_escrow_count"] == 1

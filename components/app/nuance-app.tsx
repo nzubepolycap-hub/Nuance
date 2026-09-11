@@ -80,6 +80,13 @@ function mapEscrow(e: ApiEscrow): Escrow {
     creatorAddress: e.creator_address,
     counterpartyAddress: e.counterparty_address,
     total: Number(e.total),
+    asset: {
+      id: e.asset.id,
+      symbol: e.asset.symbol,
+      decimals: e.asset.decimals,
+      contractAddress: e.asset.contract_address,
+      isNative: e.asset.is_native,
+    },
     statusKey: e.status_key,
     milestones: e.milestones.map(mapMilestone),
     contractAddress: e.contract_address,
@@ -1504,16 +1511,21 @@ export function NuanceApp() {
 
   // CRITICAL fix, 2026-09-08: escrowVerdict used to come ONLY from
   // escrowConsensus (useConsensusPolling against a ConsensusJob id) —
-  // which only ever exists for the off-chain path. An on-chain-judged
-  // milestone (a real GenVM verdict already landed) had no ConsensusJob
-  // at all, so this stayed null forever — meaning "Release Payment" and
-  // "Escalate to Internet Court" (both driven entirely by this value,
-  // via ConsensusPanel) never appeared for it, no matter what the real
-  // on-chain result was. A live test found the panel stuck on "Awaiting
-  // deliverable submission…" even after a real "Disputed" verdict had
-  // already come back. Falls back to synthesizing a verdict straight
-  // from the active milestone's own on-chain-synced statusKey/reasoning
-  // when there's no ConsensusJob to poll.
+  // which only exists for the lifetime of the browser session that
+  // triggered it (escrowJobIds is plain React state, never persisted).
+  // A milestone judged in an *earlier* session — on-chain, or off-chain
+  // and simply reopened after its own ConsensusJob finished being
+  // polled — had nothing to fall back to, so this stayed null forever:
+  // "Release Payment" and "Escalate to Internet Court" (both driven
+  // entirely by this value, via ConsensusPanel) never appeared, no
+  // matter what the real recorded verdict was. First found live for the
+  // on-chain case 2026-09-08 (fixed then); found again 2026-09-10 for
+  // the off-chain case specifically — reopening ANY already-disputed
+  // off-chain milestone after a page refresh left "Escalate to Internet
+  // Court" permanently unreachable, since the fallback below only ever
+  // checked activeMilestoneOnChain. Falls back to synthesizing a verdict
+  // straight from the active milestone's own persisted statusKey/
+  // reasoning when there's no ConsensusJob to poll — on-chain or off.
   const activeMilestone = selectedEscrow
     ? selectedEscrow.milestones[activeMilestoneIndex(selectedEscrow.milestones)]
     : null;
@@ -1541,20 +1553,25 @@ export function NuanceApp() {
         confidence: escrowConsensus.verdict.confidence,
         reasoning: escrowConsensus.verdict.reasoning,
       }
-    : activeMilestoneOnChain &&
-        activeMilestone &&
-        (activeMilestone.statusKey === "approved" || activeMilestone.statusKey === "disputed")
+    : activeMilestone && (activeMilestone.statusKey === "approved" || activeMilestone.statusKey === "disputed")
       ? {
           approved: activeMilestone.statusKey === "approved",
           disputed: activeMilestone.statusKey === "disputed",
-          label:
-            activeMilestone.statusKey === "approved"
+          label: activeMilestoneOnChain
+            ? activeMilestone.statusKey === "approved"
               ? "GenVM Consensus: Approved"
-              : "GenVM Consensus: Disputed",
+              : "GenVM Consensus: Disputed"
+            : activeMilestone.statusKey === "approved"
+              ? "Consensus: Approved"
+              : "Consensus: Disputed",
           // GenVM doesn't expose a numeric confidence the way the
-          // off-chain ensemble's per-provider vote average does — this
-          // just means "a real decided on-chain verdict exists."
-          confidence: 100,
+          // off-chain ensemble's per-provider vote average does, and a
+          // *persisted* off-chain verdict has no confidence value to
+          // fall back to either (Milestone never stores one — only the
+          // ConsensusJob that judged it did, and that job's own record
+          // isn't looked up here). Omitted either way, not fabricated —
+          // EscrowVerdict.confidence is optional for exactly this.
+          confidence: activeMilestoneOnChain ? 100 : undefined,
           reasoning: activeMilestone.reasoning ?? "",
         }
       : null;

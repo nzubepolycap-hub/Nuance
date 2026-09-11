@@ -53,10 +53,14 @@ class ConsensusStage(IntEnum):
 
 
 class ProposalStatus(StrEnum):
-    """A governance proposal's lifecycle. finalize() (routers/governance.py)
-    is the only thing that moves ACTIVE -> PASSED/REJECTED; EXECUTED is
-    reserved for a future action that actually applies a passed proposal's
-    effect (see ROADMAP.md Part 1) and isn't set by anything yet."""
+    """A governance proposal's lifecycle. `_finalize_if_due` (routers/
+    governance.py) is the only logic that moves ACTIVE -> PASSED/REJECTED
+    — called both by the explicit POST /proposals/{id}/finalize endpoint
+    and, as of 2026-09-10, lazily by list_proposals/get_proposal so a
+    proposal doesn't stay stuck at ACTIVE forever just because nothing
+    ever called finalize on it. EXECUTED is reserved for a future action
+    that actually applies a passed proposal's effect (see ROADMAP.md Part
+    1) and isn't set by anything but the explicit execute endpoint."""
 
     ACTIVE = "active"
     PASSED = "passed"

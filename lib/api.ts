@@ -157,12 +157,25 @@ export interface ApiMilestone {
   released_at: string | null;
 }
 
+// ROADMAP.md Part 4 6.2's multi-token collateral — the settlement
+// currency an escrow's total/milestone amounts are denominated in. Every
+// escrow has one (server_default points existing rows at native GEN, id
+// 1 — see models/core.py::Asset's own docstring), so this is never null.
+export interface ApiAsset {
+  id: number;
+  symbol: string;
+  decimals: number;
+  contract_address: string | null;
+  is_native: boolean;
+}
+
 export interface ApiEscrow {
   id: number;
   creator_address: string;
   counterparty_address: string;
   title: string;
   total: string;
+  asset: ApiAsset;
   status_key: StatusKey;
   created_at: string;
   milestones: ApiMilestone[];

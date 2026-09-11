@@ -129,6 +129,33 @@ def _progress(proposal: Proposal, eligible_voters: int) -> dict:
     }
 
 
+def _finalize_if_due(proposal: Proposal, eligible_voters: int) -> bool:
+    """The actual PASSED/REJECTED state transition, shared by the explicit
+    POST /proposals/{id}/finalize endpoint below and the lazy auto-
+    finalize in list_proposals/get_proposal (added 2026-09-10 — closing a
+    real gap found during an integration audit: nothing in this app,
+    frontend or backend, ever called finalize_proposal automatically or
+    exposed a button for it, so every proposal stayed stuck at ACTIVE
+    forever once voting closed, even though this function's own
+    docstring already anticipated "a future bulk sweep" that was never
+    built). Mutates `proposal` in place and returns whether it changed
+    anything; the caller is responsible for committing — a plain GET
+    auto-finalizing a stale proposal as a side effect is a deliberate,
+    low-risk write (see list_proposals' own comment on why no row lock
+    is needed here specifically), not something every caller should
+    re-derive.
+    """
+    if proposal.status != ProposalStatus.ACTIVE:
+        return False
+    if datetime.now(timezone.utc) < _aware(proposal.end_time):
+        return False
+
+    progress = _progress(proposal, eligible_voters)
+    passed = progress["quorum_met"] and progress["for_pct"] >= proposal.pass_threshold
+    proposal.status = ProposalStatus.PASSED if passed else ProposalStatus.REJECTED
+    return True
+
+
 def _proposal_fields(proposal: Proposal, eligible_voters: int, user_vote: VoteChoice | None) -> dict:
     return {
         "id": proposal.id,
@@ -170,6 +197,21 @@ async def list_proposals(
     proposals = list(result.scalars().all())
     eligible_voters = await _total_eligible_voters(db)
 
+    # Lazy auto-finalize (see _finalize_if_due's own docstring). No row
+    # lock here on purpose — a GET has no business contending with a
+    # concurrent voter/finalizer for the row, and a racing double-
+    # finalize converges on the same deterministic PASSED/REJECTED value
+    # either way (the tally it's computed from doesn't change), unlike
+    # vote-casting's read-modify-write, which genuinely needs the lock
+    # _get_proposal_for_update_or_404 gives it.
+    # A list comprehension, not any(...) directly on the generator — any()
+    # short-circuits on the first True, which here would silently skip
+    # calling _finalize_if_due (a real mutation, not a pure predicate) on
+    # every proposal after the first one due.
+    any_finalized = [_finalize_if_due(p, eligible_voters) for p in proposals]
+    if any(any_finalized):
+        await db.commit()
+
     user_votes: dict[int, VoteChoice] = {}
     if current_user is not None and proposals:
         vote_result = await db.execute(
@@ -193,6 +235,10 @@ async def get_proposal(
 ) -> ProposalDetailRead:
     proposal = await _get_proposal_or_404(proposal_id, db)
     eligible_voters = await _total_eligible_voters(db)
+
+    if _finalize_if_due(proposal, eligible_voters):
+        await db.commit()
+        await db.refresh(proposal)
 
     vote_result = await db.execute(
         select(Vote).where(Vote.proposal_id == proposal_id).order_by(Vote.created_at.asc())
@@ -306,9 +352,7 @@ async def finalize_proposal(
             detail=f"Voting is still open; ends at {proposal.end_time.isoformat()}.",
         )
 
-    progress = _progress(proposal, eligible_voters)
-    passed = progress["quorum_met"] and progress["for_pct"] >= proposal.pass_threshold
-    proposal.status = ProposalStatus.PASSED if passed else ProposalStatus.REJECTED
+    _finalize_if_due(proposal, eligible_voters)  # status is ACTIVE and past due — always True here
 
     await db.commit()
     await db.refresh(proposal)

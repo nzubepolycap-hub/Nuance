@@ -243,6 +243,47 @@ async def test_finalize_is_idempotent(client):
     assert first.json()["status"] == second.json()["status"] == "passed"
 
 
+# --- lazy auto-finalize (list/get) ------------------------------------------
+#
+# Regression coverage for a real integration gap found 2026-09-10: nothing
+# in this app, frontend or backend, ever called POST /proposals/{id}/
+# finalize automatically — no cron, no UI button — so a proposal stayed
+# ACTIVE forever once its own end_time passed, even though finalize_
+# proposal's own docstring had anticipated "a future bulk sweep" that was
+# never built. Fixed by having list_proposals/get_proposal opportunistically
+# finalize any past-due ACTIVE proposal as a side effect of the read
+# (_finalize_if_due) — these tests prove that actually happens without ever
+# calling the explicit /finalize endpoint themselves.
+
+
+@pytest.mark.asyncio
+async def test_get_proposal_lazily_finalizes_a_past_due_active_proposal(client):
+    proposal_id = await _seed_proposal(
+        end_delta_days=-1, quorum_threshold=0, pass_threshold=50, total_for=3, total_against=1
+    )
+    resp = client.get(f"/proposals/{proposal_id}")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "passed"
+
+
+@pytest.mark.asyncio
+async def test_list_proposals_lazily_finalizes_a_past_due_active_proposal(client):
+    proposal_id = await _seed_proposal(end_delta_days=-1, quorum_threshold=1, total_for=0)
+    resp = client.get("/proposals")
+    assert resp.status_code == 200
+    by_id = {p["id"]: p for p in resp.json()}
+    assert by_id[proposal_id]["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_list_proposals_does_not_touch_a_still_open_proposal(client):
+    proposal_id = await _seed_proposal(end_delta_days=7)
+    resp = client.get("/proposals")
+    assert resp.status_code == 200
+    by_id = {p["id"]: p for p in resp.json()}
+    assert by_id[proposal_id]["status"] == "active"
+
+
 # --- execute ---------------------------------------------------------------
 
 

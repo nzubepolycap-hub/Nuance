@@ -180,7 +180,9 @@ async def deploy_escrow_contract(escrow_id: int) -> None:
     """
     async with AsyncSessionLocal() as db:
         result = await db.execute(
-            select(Escrow).where(Escrow.id == escrow_id).options(selectinload(Escrow.milestones))
+            select(Escrow)
+            .where(Escrow.id == escrow_id)
+            .options(selectinload(Escrow.milestones), selectinload(Escrow.asset))
         )
         escrow = result.scalar_one_or_none()
         if escrow is None:
@@ -188,6 +190,32 @@ async def deploy_escrow_contract(escrow_id: int) -> None:
             return
         if escrow.contract_address is not None:
             return  # already linked — a duplicate/retry queue, not an error
+
+        # FOUND 2026-09-10 (integration audit) — this function had no idea
+        # ROADMAP.md Part 4 6.2's Asset model existed at all: it always
+        # ran _gen_to_wei (a fixed 18-decimal GEN conversion) on the
+        # milestone amount and deployed a contract whose fund_escrow only
+        # ever accepts native currency (gl.message.value — see contracts/
+        # nuance_escrow.py; there is no ERC-20 transfer path anywhere in
+        # this contract or components/app/genlayer-write-client.ts). A
+        # non-native escrow (e.g. the seeded testnet USDC, 6 decimals) —
+        # not creatable from the UI yet, but very much creatable today via
+        # a direct POST /escrows call or the SDK (EscrowCreate.asset_
+        # symbol) — would have been deployed with an amount that's wrong
+        # by 12 orders of magnitude and no real way to ever fund it in the
+        # asset it's actually denominated in. Skip auto-deploy entirely
+        # for a non-native asset; it stays on the (asset-agnostic —
+        # release_milestone does no unit conversion at all) legacy
+        # off-chain path until this contract actually supports a second
+        # settlement asset.
+        if not escrow.asset.is_native:
+            logger.info(
+                "deploy_escrow_contract: escrow id=%s is denominated in %s, not native GEN — "
+                "NuanceEscrow only supports native-currency funding today, staying off-chain.",
+                escrow_id,
+                escrow.asset.symbol,
+            )
+            return
 
         milestone = min(escrow.milestones, key=lambda m: m.order_index, default=None)
         if milestone is None:

@@ -54,15 +54,19 @@ def _get_token(client: TestClient, wallet: Account) -> str:
     return resp.json()["access_token"]
 
 
-async def _create_prediction(contract_address: str | None) -> int:
+async def _create_prediction(
+    contract_address: str | None,
+    status_key: str = "open",
+    resolution_date: datetime | None = None,
+) -> int:
     async with AsyncSessionLocal() as db:
         prediction = Prediction(
             title="Test market",
             description="Test description",
             category="TEST",
-            resolution_date=datetime.now(timezone.utc) + timedelta(days=1),
+            resolution_date=resolution_date or (datetime.now(timezone.utc) + timedelta(days=1)),
             volume=0,
-            status_key="open",
+            status_key=status_key,
             contract_address=contract_address,
         )
         db.add(prediction)
@@ -132,6 +136,50 @@ def test_place_bet_on_chain_rejects_non_preset_amount(client: TestClient):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 422
+
+
+def test_place_bet_on_chain_rejects_a_closed_market(client: TestClient):
+    """Regression test for a real security-review finding (2026-09-09,
+    fixed 2026-09-10): place_bet_on_chain used to skip the same "is this
+    market actually open" check place_bet enforces, letting a bet land
+    on an already-resolved market and skew services/payout.py's
+    pari-mutuel math for every other real bettor. See
+    _assert_market_open_for_betting's own docstring."""
+    wallet = Account.create()
+    token = _get_token(client, wallet)
+    prediction_id = asyncio.run(_create_prediction(_CONTRACT_ADDRESS, status_key="resolved"))
+
+    resp = client.post(
+        f"/predictions/{prediction_id}/bet/on-chain",
+        json={"tx_hash": _FAKE_TX_HASH, "side": "yes", "amount": 500},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert "not open" in resp.json()["detail"].lower()
+
+
+def test_place_bet_on_chain_rejects_a_market_past_its_deadline(client: TestClient):
+    """Same regression as test_place_bet_on_chain_rejects_a_closed_market
+    above, the other half of the guard: still `status_key == "open"` (the
+    indexer hasn't caught up to flip it yet — a real, expected window,
+    not a contrived case) but already past its own resolution_date."""
+    wallet = Account.create()
+    token = _get_token(client, wallet)
+    prediction_id = asyncio.run(
+        _create_prediction(
+            _CONTRACT_ADDRESS,
+            status_key="open",
+            resolution_date=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+    )
+
+    resp = client.post(
+        f"/predictions/{prediction_id}/bet/on-chain",
+        json={"tx_hash": _FAKE_TX_HASH, "side": "yes", "amount": 500},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 400
+    assert "closed" in resp.json()["detail"].lower()
 
 
 def test_resolve_prediction_rejects_on_chain_linked_market(client: TestClient):

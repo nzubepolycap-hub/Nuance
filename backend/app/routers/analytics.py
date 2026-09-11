@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.enums import StatusKey
-from app.models import Dispute, Escrow, Milestone, Prediction
+from app.models import Asset, Dispute, Escrow, Milestone, Prediction
 from app.routers.validators import _validator_stats
 from app.schemas import AnalyticsOverview
 
@@ -41,12 +41,29 @@ async def _tvl_open_escrows(db: AsyncSession) -> tuple[Decimal, int]:
     exists" (a fully-paid-out escrow has nothing left locked in it, and a
     cancelled one already refunded whatever it held — see contracts/
     nuance_escrow.py's cancel_escrow). `open_escrow_count` is a distinct
-    escrow count over that same join, not a milestone count."""
+    escrow count over that same join, not a milestone count.
+
+    Native-asset (GEN) escrows only — FOUND 2026-09-10 (integration
+    audit): this used to sum every escrow's milestones regardless of
+    which Asset (ROADMAP.md Part 4 6.2) they're actually denominated in,
+    silently blending e.g. testnet USDC amounts into a field this
+    response calls `tvl_open_escrows_gen`. A genuinely correct multi-
+    asset TVL would need a per-asset breakdown, not a single blended
+    number with no fixed unit — out of scope for this fix; this just
+    makes sure the existing "_gen" field is never wrong about its own
+    unit, the same principle services/genlayer_deploy.py's matching fix
+    applies on the deploy side.
+    """
     result = await db.execute(
         select(func.coalesce(func.sum(Milestone.amount), 0), func.count(func.distinct(Escrow.id)))
         .select_from(Milestone)
         .join(Escrow, Escrow.id == Milestone.escrow_id)
-        .where(Escrow.status_key != StatusKey.CANCELLED, Milestone.released_at.is_(None))
+        .join(Asset, Asset.id == Escrow.asset_id)
+        .where(
+            Escrow.status_key != StatusKey.CANCELLED,
+            Milestone.released_at.is_(None),
+            Asset.is_native.is_(True),
+        )
     )
     total, count = result.one()
     return Decimal(total), int(count)
