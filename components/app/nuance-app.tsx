@@ -6,6 +6,7 @@ import { WalletModal } from "@/components/app/wallet-modal";
 import { DashboardView } from "@/components/app/views/dashboard-view";
 import { EscrowDetailView } from "@/components/app/views/escrow-detail-view";
 import { CreateEscrowView } from "@/components/app/views/create-escrow-view";
+import { CreateMarketView } from "@/components/app/views/create-market-view";
 import { PredictionsView } from "@/components/app/views/predictions-view";
 import { PredictionDetailView } from "@/components/app/views/prediction-detail-view";
 import { DisputesView } from "@/components/app/views/disputes-view";
@@ -431,6 +432,23 @@ export function NuanceApp() {
   const [formCriteria, setFormCriteria] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
 
+  // Create-market form (2026-09-12 rebrand) — separate state from the
+  // escrow create-form above on purpose, same reasoning every other
+  // action in this file gets its own error/pending state rather than
+  // sharing one: the two forms can be mid-fill independently, and a
+  // failure in one must never surface on the other's screen.
+  const [formMarketTitle, setFormMarketTitle] = useState("");
+  const [formMarketCategory, setFormMarketCategory] = useState("");
+  const [formMarketResolutionDate, setFormMarketResolutionDate] = useState("");
+  const [formMarketResolutionSourceUrl, setFormMarketResolutionSourceUrl] = useState("");
+  const [formMarketDescription, setFormMarketDescription] = useState("");
+  const [createMarketError, setCreateMarketError] = useState<string | null>(null);
+  // Shown on the predictions list after a successful create — the new
+  // market itself won't appear there yet (starts "pending_review",
+  // hidden until deploy_prediction_contract actually links it), so
+  // without this the list would look like nothing happened.
+  const [createMarketNotice, setCreateMarketNotice] = useState<string | null>(null);
+
   // Prediction markets ------------------------------------------------------
   const [predictions, setPredictions] = useState<Prediction[]>([]);
   const [predictionsLoading, setPredictionsLoading] = useState(true);
@@ -833,13 +851,23 @@ export function NuanceApp() {
     const activeMilestone = escrowData.milestones.find((m) => m.status_key !== "approved");
     const contractAddress = escrowContractAddress(escrowData);
 
-    if (
-      contractAddress &&
-      activeMilestone &&
-      milestoneIsOnChain(escrowData, activeMilestone) &&
-      wallet.status === "connected" &&
-      wallet.provider
-    ) {
+    if (contractAddress && activeMilestone && milestoneIsOnChain(escrowData, activeMilestone)) {
+      // Wallet-readiness split out from the linkage check on purpose
+      // (FIXED 2026-09-11) — this used to be one combined condition, so a
+      // linked milestone with no wallet connected fell straight through
+      // to the "legacy off-chain" branch below and got a real off-chain
+      // LLM verdict for an on-chain item. backend/app/services/
+      // consensus.py's ChainUnavailableError guard now rejects that
+      // off-chain call outright (503) for exactly this reason — so this
+      // has to stop the fallback here too, with a real message instead of
+      // a confusing request failure.
+      if (!(wallet.status === "connected" && wallet.provider)) {
+        setEscrowActionError(
+          "This milestone is on-chain — connect your wallet to submit a deliverable for it."
+        );
+        return;
+      }
+
       // On-chain path: sign and send NuanceEscrow.submit_deliverable
       // directly from this browser via the connected wallet — no LLM call
       // from our own backend, GenVM's validator committee does that
@@ -920,7 +948,23 @@ export function NuanceApp() {
     const disputeCourtAddress = disputeCourtContractAddress();
     const escrowAddress = escrowContractAddress(escrowData);
 
-    if (disputeCourtAddress && escrowAddress && wallet.status === "connected" && wallet.provider) {
+    if (disputeCourtAddress && escrowAddress) {
+      // Wallet-readiness split out from the linkage check on purpose
+      // (FIXED 2026-09-11) — same reasoning as submitDeliverable's own
+      // fix note above: a linked escrow with no wallet connected used to
+      // fall through to the "legacy off-chain" branch below and get a
+      // real off-chain LLM ruling on an on-chain dispute.
+      // backend/app/services/consensus.py's ChainUnavailableError guard
+      // now rejects that off-chain call outright (503), so this has to
+      // stop the fallback here too, with a real message.
+      if (!(wallet.status === "connected" && wallet.provider)) {
+        setEscrowActionError(
+          "This escrow is on-chain — connect your wallet to file a dispute for it."
+        );
+        setEscalatePending(false);
+        return;
+      }
+
       // On-chain path: sign and send NuanceDisputeCourt.file_dispute
       // directly from this browser. No ConsensusJob, no run_consensus —
       // GenVM's own validator committee is the jury once adjudicate_dispute
@@ -1157,6 +1201,49 @@ export function NuanceApp() {
     setBetSide(null);
     setBettingError(null);
   }
+  function goCreateMarket() {
+    setView("createMarket");
+    setCreateMarketError(null);
+    setCreateMarketNotice(null);
+    setFormMarketTitle("");
+    setFormMarketCategory("");
+    setFormMarketResolutionDate("");
+    setFormMarketResolutionSourceUrl("");
+    setFormMarketDescription("");
+  }
+  async function submitCreateMarket() {
+    if (
+      !formMarketTitle.trim() ||
+      !formMarketCategory.trim() ||
+      !formMarketResolutionDate ||
+      !formMarketResolutionSourceUrl.trim() ||
+      !formMarketDescription.trim()
+    ) {
+      return;
+    }
+    setCreateMarketError(null);
+    try {
+      // <input type="datetime-local"> has no timezone of its own — new
+      // Date(...) on that exact string interprets it in the browser's
+      // local zone, and .toISOString() below converts that to a real UTC
+      // instant, matching what PredictionCreate's resolution_date expects.
+      const resolutionDateIso = new Date(formMarketResolutionDate).toISOString();
+      await api.createPrediction({
+        title: formMarketTitle,
+        description: formMarketDescription,
+        category: formMarketCategory,
+        resolution_date: resolutionDateIso,
+        resolution_source_url: formMarketResolutionSourceUrl,
+      });
+      setCreateMarketNotice(
+        "Market created — deploying on-chain now (usually a few minutes). " +
+          "It'll appear here once the GenVM contract is live."
+      );
+      setView("predictions");
+    } catch (err) {
+      setCreateMarketError(errorText(err, "Failed to create market."));
+    }
+  }
   function openPrediction(id: number) {
     setView("predictionDetail");
     setSelectedPredictionId(id);
@@ -1186,7 +1273,22 @@ export function NuanceApp() {
     }
     const contractAddress = predictionContractAddress(predictionData);
 
-    if (contractAddress && wallet.status === "connected" && wallet.provider) {
+    if (contractAddress) {
+      // Wallet-readiness split out from the linkage check on purpose
+      // (FIXED 2026-09-11) — a linked market with no wallet connected
+      // used to fall through to the "legacy off-chain" branch below and
+      // mirror a notional, no-real-stake-behind-it bet onto it.
+      // backend/app/services/consensus.py's ChainUnavailableError guard
+      // (reused by routers/predictions.py's place_bet for the same
+      // "never silently substitute for a linked item" reason) now rejects
+      // that off-chain call outright (503), so this has to stop the
+      // fallback here too, with a real message.
+      if (!(wallet.status === "connected" && wallet.provider)) {
+        setBettingError("This market is on-chain — connect your wallet to place a bet.");
+        setIsBetting(false);
+        return;
+      }
+
       // On-chain path: sign and send NuancePredictionMarket.bet directly
       // from this browser via the connected wallet — a real, payable
       // transaction (see betOnChain's own comment on the milli-GEN-to-wei
@@ -1254,7 +1356,25 @@ export function NuanceApp() {
     }
     const contractAddress = predictionContractAddress(predictionData);
 
-    if (contractAddress && wallet.status === "connected" && wallet.provider) {
+    if (contractAddress) {
+      // Wallet-readiness split out from the linkage check on purpose
+      // (FIXED 2026-09-11) — a linked market with no wallet connected used
+      // to fall through to the "legacy off-chain" branch below, which
+      // routers/predictions.py's resolve_prediction now refuses outright
+      // (503/ChainUnavailableError) for a linked market — it resolves
+      // on-chain automatically via services/genlayer_indexer.py's
+      // trigger_pending_market_resolutions instead. See
+      // backend/app/services/consensus.py's ChainUnavailableError
+      // docstring.
+      if (!(wallet.status === "connected" && wallet.provider)) {
+        setBettingError(
+          "This market is on-chain — connect your wallet to trigger resolution manually, " +
+            "or wait for it to resolve automatically once its cutoff passes."
+        );
+        setIsResolving(false);
+        return;
+      }
+
       // On-chain path: sign and send NuancePredictionMarket.resolve_market
       // directly. Manual/optional — services/genlayer_indexer.py's
       // trigger_pending_market_resolutions already does this automatically
@@ -1404,7 +1524,21 @@ export function NuanceApp() {
     const disputeCourtAddress = disputeCourtContractAddress();
     const isOnChainFiled = disputeData.chain_status !== "legacy_offchain";
 
-    if (isOnChainFiled && disputeCourtAddress && wallet.status === "connected" && wallet.provider) {
+    if (isOnChainFiled) {
+      // Wallet/config-readiness split out from the linkage check on
+      // purpose (FIXED 2026-09-11) — an on-chain-filed dispute with no
+      // wallet connected used to fall through to the "legacy off-chain"
+      // branch below, which is exactly the bug this function's own header
+      // comment describes fixing once already. backend/app/services/
+      // consensus.py's ChainUnavailableError guard now rejects that
+      // off-chain call outright (503) for an on-chain-filed dispute, so
+      // this has to stop the fallback here too, with a real message.
+      if (!disputeCourtAddress || !(wallet.status === "connected" && wallet.provider)) {
+        setDisputeActionError(
+          "This dispute was filed on-chain — connect your wallet to submit evidence for it."
+        );
+        return;
+      }
       // On-chain path — requires the real numeric dispute id, which only
       // exists once services/genlayer_indexer.py's resolve_pending_
       // dispute_ids has matched the filing tx. Refuse rather than
@@ -1705,13 +1839,41 @@ export function NuanceApp() {
             </>
           ))}
 
+        {view === "createMarket" &&
+          (wallet.status !== "connected" ? (
+            <WalletAuthGuard onConnect={() => setShowWalletModal(true)} />
+          ) : (
+            <>
+              {createMarketError && <ErrorBanner message={createMarketError} />}
+              <CreateMarketView
+                formTitle={formMarketTitle}
+                formCategory={formMarketCategory}
+                formResolutionDate={formMarketResolutionDate}
+                formResolutionSourceUrl={formMarketResolutionSourceUrl}
+                formDescription={formMarketDescription}
+                onTitleChange={setFormMarketTitle}
+                onCategoryChange={setFormMarketCategory}
+                onResolutionDateChange={setFormMarketResolutionDate}
+                onResolutionSourceUrlChange={setFormMarketResolutionSourceUrl}
+                onDescriptionChange={setFormMarketDescription}
+                onCancel={goPredictions}
+                onSubmit={submitCreateMarket}
+              />
+            </>
+          ))}
+
         {view === "predictions" &&
           (predictionsLoading ? (
             <LoadingState label="Loading prediction markets from backend…" />
           ) : predictionsError ? (
             <ErrorCard message={predictionsError} onRetry={loadData} />
           ) : (
-            <PredictionsView predictions={predictions} onOpen={openPrediction} />
+            <PredictionsView
+              predictions={predictions}
+              onOpen={openPrediction}
+              onOpenCreate={goCreateMarket}
+              notice={createMarketNotice}
+            />
           ))}
 
         {view === "predictionDetail" && selectedPrediction && (

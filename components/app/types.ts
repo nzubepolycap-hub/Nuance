@@ -18,6 +18,7 @@ export type View =
   | "detail"
   | "create"
   | "predictions"
+  | "createMarket"
   | "predictionDetail"
   | "disputes"
   | "disputeDetail"

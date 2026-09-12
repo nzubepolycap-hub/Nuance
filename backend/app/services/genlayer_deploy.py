@@ -259,24 +259,41 @@ async def deploy_escrow_contract(escrow_id: int) -> None:
 
 
 async def deploy_prediction_contract(prediction_id: int) -> None:
-    """Called from services/market_generator.py's _process_events for
-    every market it auto-publishes (auto_publish=True, immediately
-    "open" — a "pending_review" draft is NOT deployed here; it might
-    still be discarded/edited before a human ever makes it live, and
-    spending real testnet GEN deploying a contract for a market that may
-    never launch isn't worth it). Deploys a fresh NuancePredictionMarket
-    instance with that market's real question/resolution data and links
-    it (Prediction.contract_address) — from this point on,
-    components/app/nuance-app.tsx's placeBet/resolveMarket see a real
-    linked contract and route through the on-chain path automatically.
+    """Two callers, two different "pending_review" meanings:
+
+    - services/market_generator.py's _process_events, for every market it
+      auto-publishes (auto_publish=True, immediately "open" — a
+      "pending_review" DRAFT from that pipeline is never passed here at
+      all; it might still be discarded/edited before a human makes it
+      live, and spending real testnet GEN deploying a contract for a
+      market that may never launch isn't worth it). Retired 2026-09-12 in
+      favor of the path below, but left in place rather than deleted.
+    - routers/predictions.py's create_prediction (2026-09-12 rebrand: a
+      real person authoring a real market, replacing the pipeline above).
+      Every market from there STARTS "pending_review" on purpose — see
+      that endpoint's own docstring — specifically so this function can
+      deploy it: on success, this flips it to "open" (the case handled
+      right below), which is what actually makes it visible/bettable.
+      Before this fix, only market_generator's callers ever set
+      contract_address; a create_prediction market that deployed
+      successfully would have stayed invisible forever with a real
+      contract nobody could reach.
+
+    Either way: deploys a fresh NuancePredictionMarket instance with that
+    market's real question/resolution data and links it (Prediction.
+    contract_address) — from this point on, components/app/nuance-app.tsx's
+    placeBet/resolveMarket see a real linked contract and route through
+    the on-chain path automatically.
 
     Skips (logs, doesn't fail) a market with no resolution_source_url —
     NuancePredictionMarket.resolve_market's whole judgment depends on
-    fetching that URL (gl.nondet.web.render); a market with nothing to
-    check against can't meaningfully resolve on-chain at all, on-chain or
-    off (services/prediction_oracle.py needs the same thing implicitly,
-    via the resolution criteria text referencing a real source). Runs its
-    own DB session — same reasoning deploy_escrow_contract gives.
+    fetching that URL (gl.nondet.web.get(), see that contract's own fix
+    note), and a market with nothing to check against can't meaningfully
+    resolve on-chain at all. create_prediction's own schema (PredictionCreate)
+    already requires this field, so this branch is dead for that caller —
+    kept for market_generator's, whose Prediction rows predate the
+    requirement. Runs its own DB session — same reasoning
+    deploy_escrow_contract gives.
     """
     async with AsyncSessionLocal() as db:
         prediction = await db.get(Prediction, prediction_id)
@@ -312,5 +329,14 @@ async def deploy_prediction_contract(prediction_id: int) -> None:
             return
 
         prediction.contract_address = address
+        # See this function's own docstring — the actual create_prediction
+        # activation step. Only ever flips pending_review->open, so this
+        # is a no-op for market_generator's already-"open" auto-published
+        # rows (harmless either way, checked explicitly rather than
+        # unconditionally overwriting status_key so this function never
+        # clobbers some other state a market might be in by the time its
+        # background deploy finally lands).
+        if prediction.status_key == "pending_review":
+            prediction.status_key = "open"
         await db.commit()
-        logger.info("Auto-deployed NuancePredictionMarket for prediction id=%s -> %s", prediction_id, address)
+        logger.info("Deployed NuancePredictionMarket for prediction id=%s -> %s", prediction_id, address)

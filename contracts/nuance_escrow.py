@@ -240,9 +240,28 @@ class NuanceEscrow(gl.Contract):
         # exactly like football_bets.py's own _check_match/get_match_result
         # closure — not as a separate pre-step outside the consensus block.
         def leader_fn() -> dict:
+            # FIXED 2026-09-11 — was gl.nondet.web.render(deliverable_url,
+            # mode="text"). That exact call shape was CONFIRMED LIVE
+            # (2026-09-08, two separate real failed transactions) to
+            # reliably produce LEADER_TIMEOUT (status 13) on live Bradbury
+            # in this same project — see nuance_dispute_court.py's
+            # add_evidence for the full account and the fix it already
+            # got. That fix was never backported here; this milestone
+            # review path carried the identical bug the whole time.
+            # gl.nondet.web.get() (a plain HTTP GET, not render()'s
+            # headless-browser-style full-page evaluation) is the
+            # verified-working replacement. Wrapped in try/except and
+            # truncated to 3000 chars for the same reasons as that fix:
+            # an unreachable URL gets an honest note instead of hanging
+            # the whole nondet block, and a huge page can't blow the
+            # LLM's context budget.
             proof_context = "No linked proof URL was submitted."
             if deliverable_url:
-                proof_context = gl.nondet.web.render(deliverable_url, mode="text")
+                try:
+                    response = gl.nondet.web.get(deliverable_url)
+                    proof_context = response.body.decode("utf-8", errors="replace")[:3000]
+                except Exception as exc:
+                    proof_context = f"(Proof URL was unreachable or timed out: {exc})"
 
             prompt = f"""You are an impartial reviewer adjudicating a milestone
 deliverable for an escrow agreement between two independent parties.

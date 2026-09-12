@@ -44,7 +44,7 @@ from app.schemas import (
     OnChainFundAck,
     OnChainSubmissionAck,
 )
-from app.services.consensus import run_consensus
+from app.services.consensus import ChainUnavailableError, run_consensus
 from app.services.genlayer_deploy import deploy_escrow_contract
 
 router = APIRouter(prefix="/escrows", tags=["escrows"])
@@ -223,6 +223,18 @@ async def submit_deliverable(
     current_user: User = Depends(get_current_user),
 ) -> DeliverableSubmissionRead:
     escrow = await _get_escrow_or_404(escrow_id, db)
+    # Refuses to let a linked escrow's milestone be judged by the
+    # off-chain LLM mock — see ChainUnavailableError's own docstring.
+    # Checked before anything else in this endpoint so a linked escrow
+    # never gets a DeliverableSubmission/ConsensusJob row created at all;
+    # the caller should be using POST /escrows/{id}/deliverable/on-chain
+    # instead (submit_deliverable_on_chain below).
+    if escrow.contract_address is not None:
+        raise ChainUnavailableError(
+            f"Escrow {escrow_id} is linked to a deployed contract "
+            f"({escrow.contract_address}) — use POST /escrows/{escrow_id}"
+            "/deliverable/on-chain instead of this off-chain endpoint."
+        )
     milestone = _active_milestone(escrow)
     if milestone is None:
         raise HTTPException(
@@ -470,6 +482,16 @@ async def raise_dispute(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only a party to this escrow can raise a dispute.",
+        )
+    # Same guard as submit_deliverable above — a linked escrow's dispute
+    # must be filed (and judged) on-chain via NuanceDisputeCourt, never
+    # through this endpoint's off-chain ConsensusJob path. See
+    # ChainUnavailableError's own docstring.
+    if escrow.contract_address is not None:
+        raise ChainUnavailableError(
+            f"Escrow {escrow_id} is linked to a deployed contract "
+            f"({escrow.contract_address}) — use POST /escrows/{escrow_id}"
+            "/dispute/on-chain instead of this off-chain endpoint."
         )
 
     milestone = _active_milestone(escrow)

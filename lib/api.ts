@@ -675,8 +675,28 @@ export async function getConsensusStatus(jobId: number): Promise<ApiConsensusSta
 
 // --- Predictions ------------------------------------------------------
 
+// 2026-09-12 rebrand — backend/app/schemas/core.py's PredictionCreate.
+// Every field maps straight through; resolution_date goes over the wire
+// as an ISO string (backend/pydantic parses it as datetime).
+export interface CreatePredictionPayload {
+  title: string;
+  description: string;
+  category: string;
+  resolution_date: string;
+  resolution_source_url: string;
+}
+
 export async function getPredictions(): Promise<ApiPrediction[]> {
   return apiFetch<ApiPrediction[]>("/predictions");
+}
+
+export async function createPrediction(
+  payload: CreatePredictionPayload
+): Promise<ApiPrediction> {
+  return apiFetch<ApiPrediction>("/predictions", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export async function getPrediction(id: number): Promise<ApiPrediction> {

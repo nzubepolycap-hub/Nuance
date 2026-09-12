@@ -234,17 +234,36 @@ export function PredictionDetailView({
                         figure services/payout.py computed, already
                         reflected here, nothing further to claim. */}
                     {prediction.contractAddress && onClaimWinnings && (
-                      <button
-                        onClick={onClaimWinnings}
-                        disabled={isClaiming || hasClaimed}
-                        className="mt-3 w-full cursor-pointer rounded-lg border border-positive/40 bg-positive/20 py-2.5 text-[13px] font-semibold text-positive-text transition-colors hover:bg-positive/30 disabled:cursor-default disabled:opacity-60"
-                      >
-                        {hasClaimed
-                          ? "Claimed ✓"
-                          : isClaiming
-                            ? "Claiming…"
-                            : "Claim Winnings"}
-                      </button>
+                      <>
+                        <button
+                          onClick={onClaimWinnings}
+                          disabled={isClaiming || hasClaimed}
+                          className="mt-3 w-full cursor-pointer rounded-lg border border-positive/40 bg-positive/20 py-2.5 text-[13px] font-semibold text-positive-text transition-colors hover:bg-positive/30 disabled:cursor-default disabled:opacity-60"
+                        >
+                          {hasClaimed
+                            ? "Submitted — check your wallet"
+                            : isClaiming
+                              ? "Submitting…"
+                              : "Claim Winnings"}
+                        </button>
+                        {/* FOUND 2026-09-12 — a real, live-verified GenVM
+                            limitation, not a guess: claim_winnings()'s own
+                            transfer call has been directly tested (two
+                            independent call shapes, both fully finalized,
+                            no error) and confirmed NOT to reliably deliver
+                            value to a wallet. "Submitted" above means
+                            exactly that and nothing more — a finalized
+                            on-chain call, not confirmed money in hand.
+                            This caption stays until that's independently
+                            fixed; removing it before then would be
+                            claiming something we've already disproven. */}
+                        <div className="mt-2 text-[11px] leading-snug text-fg-meta">
+                          ⚠ GenLayer's on-chain payout delivery hasn't been verified as
+                          reliable yet — a "Submitted" transaction is confirmed on-chain,
+                          but check your wallet balance directly before assuming the GEN
+                          has actually arrived.
+                        </div>
+                      </>
                     )}
                   </div>
                 ) : (

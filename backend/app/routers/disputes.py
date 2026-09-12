@@ -28,7 +28,7 @@ from app.schemas import (
     DisputeRead,
     OnChainEvidenceAck,
 )
-from app.services.consensus import run_consensus
+from app.services.consensus import ChainUnavailableError, run_consensus
 from app.services.realtime import format_sse, publish_dispute_message, subscribe_dispute_messages
 from app.services.webhooks import schedule_notify as schedule_webhook_notify
 
@@ -296,6 +296,17 @@ async def submit_evidence(
     current_user: User = Depends(require_user_with_scope("evidence:submit")),
 ) -> DisputeEvidenceRead:
     dispute = await _get_dispute_or_404(dispute_id, db)
+    # This exact endpoint used to be the real, shipped bug documented on
+    # submit_evidence_on_chain's own docstring below: every dispute's
+    # evidence, on-chain-filed or not, went through this off-chain
+    # ConsensusJob path with no guard. Refuses now — see
+    # ChainUnavailableError's own docstring.
+    if dispute.on_chain_tx_hash is not None:
+        raise ChainUnavailableError(
+            f"Dispute {dispute_id} was filed on-chain (tx {dispute.on_chain_tx_hash}) "
+            f"— use POST /disputes/{dispute_id}/evidence/on-chain instead of this "
+            "off-chain endpoint."
+        )
     evidence = DisputeEvidence(
         dispute_id=dispute.id,
         submitter_address=current_user.wallet_address,

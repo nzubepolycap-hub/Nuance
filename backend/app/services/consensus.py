@@ -72,6 +72,84 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+
+class ChainUnavailableError(RuntimeError):
+    """Raised instead of ever letting this module's off-chain LLM mock
+    substitute for a real GenVM validator verdict on an item that already
+    has a genuine on-chain presence (`Escrow.contract_address` or
+    `Dispute.on_chain_tx_hash` set).
+
+    Mapped to a 503 by main.py's global exception handler — deliberately
+    a handler registered once there rather than a try/except repeated at
+    every router call site, so no future write endpoint can forget it.
+
+    This is not theoretical: routers/disputes.py's submit_evidence_on_chain
+    docstring documents a real, previously-shipped version of exactly this
+    bug — before that endpoint existed, *every* dispute's evidence,
+    on-chain-filed or not, went through the off-chain submit_evidence
+    path and got an off-chain AI ruling with nothing in the UI showing the
+    swap. That specific hole is closed by the frontend now calling the
+    right endpoint — but nothing previously stopped the off-chain
+    endpoints themselves from being called directly (a stale UI, a race
+    between a chain-link landing and an in-flight request, a direct API
+    call) against an item that IS linked. `_assert_not_chain_linked`
+    below is the backstop for that: run_consensus refuses to fabricate a
+    verdict rather than silently producing one, and routers/escrows.py,
+    routers/disputes.py, routers/predictions.py each also guard their own
+    off-chain write endpoint the same way before a ConsensusJob is ever
+    queued (the only place a real HTTP 503 can still reach the caller —
+    by the time run_consensus itself runs, as a BackgroundTask, the 201
+    response is already sent)."""
+
+
+async def _assert_not_chain_linked(
+    db: AsyncSession, subject_type: ConsensusSubjectType, subject_id: int
+) -> None:
+    """Belt-and-suspenders check inside run_consensus itself — see
+    ChainUnavailableError's own docstring for why this should be
+    unreachable in practice (the routers that queue run_consensus already
+    guard the same condition before queuing it) and is kept anyway.
+    Deliberately re-queries rather than reusing _build_consensus_context's
+    own fetch: this must run and raise *before* Stage 1 starts, and
+    keeping the two queries independent means a future change to one
+    can't accidentally weaken the other.
+    """
+    if subject_type == ConsensusSubjectType.MILESTONE:
+        result = await db.execute(
+            select(Milestone)
+            .where(Milestone.id == subject_id)
+            .options(selectinload(Milestone.escrow))
+        )
+        milestone = result.scalar_one_or_none()
+        escrow = milestone.escrow if milestone else None
+        if escrow is not None and escrow.contract_address is not None:
+            raise ChainUnavailableError(
+                f"Milestone {subject_id}'s escrow (id={escrow.id}) is linked to a "
+                f"deployed contract ({escrow.contract_address}) — refusing to let the "
+                "off-chain LLM mock judge it; GenVM's own validator committee owns "
+                "this verdict."
+            )
+        return
+
+    result = await db.execute(
+        select(Dispute).where(Dispute.id == subject_id).options(selectinload(Dispute.escrow))
+    )
+    dispute = result.scalar_one_or_none()
+    if dispute is None:
+        return
+    if dispute.on_chain_tx_hash is not None:
+        raise ChainUnavailableError(
+            f"Dispute {subject_id} was filed on-chain (tx {dispute.on_chain_tx_hash}) — "
+            "refusing to let the off-chain LLM mock adjudicate it; GenVM's own "
+            "validator committee owns this verdict via adjudicate_dispute."
+        )
+    if dispute.escrow is not None and dispute.escrow.contract_address is not None:
+        raise ChainUnavailableError(
+            f"Dispute {subject_id}'s escrow (id={dispute.escrow.id}) is linked to a "
+            f"deployed contract ({dispute.escrow.contract_address}) — refusing to let "
+            "the off-chain LLM mock adjudicate it."
+        )
+
 # Matches VALIDATOR_NAMES in the frontend's consensus-panel.tsx — rows are
 # rendered by iterating this exact list, in this exact order, and
 # asyncio.gather preserves that order in its results regardless of which
@@ -614,6 +692,15 @@ async def run_consensus(
                     subject_id,
                 )
                 return
+
+            # See ChainUnavailableError's own docstring — should be
+            # unreachable (the router that queued this job already
+            # checked), kept as a backstop against ever fabricating a
+            # verdict for a real on-chain item. Raising here is caught by
+            # this function's own try/except below, which already logs
+            # loudly ("run_consensus crashed for ...") and leaves the job
+            # at its current stage rather than a fake DONE.
+            await _assert_not_chain_linked(db, subject_type, subject_id)
 
             flags = scan_for_injection(text_payload)
             if flags:

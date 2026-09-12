@@ -11,8 +11,9 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app import models  # noqa: F401 — import registers tables on Base.metadata
 from app.config import get_settings
@@ -33,6 +34,7 @@ from app.routers import (
     validators,
     webhooks,
 )
+from app.services.consensus import ChainUnavailableError
 from app.services.genlayer_indexer import run_forever as run_chain_indexer
 
 settings = get_settings()
@@ -118,6 +120,17 @@ app.include_router(governance.router)
 app.include_router(validators.router)
 app.include_router(agents.router)
 app.include_router(analytics.router)
+
+
+# Single registration point for ChainUnavailableError -> 503 — see that
+# exception's own docstring (services/consensus.py) for why every write
+# endpoint that can raise it (routers/escrows.py, disputes.py,
+# predictions.py) deliberately does NOT catch it locally: registering the
+# mapping once here means no future call site can forget it and let the
+# error surface as an unhandled 500 instead.
+@app.exception_handler(ChainUnavailableError)
+async def chain_unavailable_handler(request: Request, exc: ChainUnavailableError) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 @app.get("/health")

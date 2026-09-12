@@ -183,7 +183,11 @@ def test_place_bet_on_chain_rejects_a_market_past_its_deadline(client: TestClien
 
 
 def test_resolve_prediction_rejects_on_chain_linked_market(client: TestClient):
+    # FIXED 2026-09-11 — upgraded from 400 to 503/ChainUnavailableError so
+    # every "refuses to let the off-chain mock touch a linked item" guard
+    # in this app reports the same way. See services/consensus.py's
+    # ChainUnavailableError docstring.
     prediction_id = asyncio.run(_create_prediction(_CONTRACT_ADDRESS))
 
     resp = client.post(f"/predictions/{prediction_id}/resolve")
-    assert resp.status_code == 400
+    assert resp.status_code == 503

@@ -12,6 +12,12 @@ Covers:
   3. A failed deploy (deploy_contract returns None) leaves the market
      unlinked.
   4. An already-linked market is left alone — deploy_contract never called.
+  5. FIXED 2026-09-12 — a pending_review market (routers/predictions.py's
+     create_prediction) flips to open on a successful deploy, the actual
+     activation step for that endpoint's on-chain-only markets.
+  6. An already-open market's status_key is left alone by a successful
+     deploy (market_generator.py's auto-published rows are already open
+     from the start; this must stay a no-op for them).
 """
 
 from __future__ import annotations
@@ -43,7 +49,9 @@ def _init_schema():
 
 
 async def _create_prediction(
-    resolution_source_url: str | None, contract_address: str | None = None
+    resolution_source_url: str | None,
+    contract_address: str | None = None,
+    status_key: str = "open",
 ) -> int:
     async with AsyncSessionLocal() as db:
         prediction = Prediction(
@@ -52,7 +60,7 @@ async def _create_prediction(
             category="GENLAYER",
             resolution_date=datetime.now(timezone.utc) + timedelta(days=30),
             volume=0,
-            status_key="open",
+            status_key=status_key,
             resolution_source_url=resolution_source_url,
             contract_address=contract_address,
         )
@@ -118,6 +126,40 @@ def test_failed_deploy_leaves_it_unlinked(monkeypatch):
 
     prediction = asyncio.run(_get_prediction(prediction_id))
     assert prediction.contract_address is None
+
+
+def test_pending_review_flips_to_open_on_successful_deploy(monkeypatch):
+    prediction_id = asyncio.run(
+        _create_prediction("https://genlayer.com/blog/mainnet", status_key="pending_review")
+    )
+
+    async def _fake_deploy_contract(file, args):
+        return _FAKE_ADDRESS
+
+    monkeypatch.setattr(genlayer_deploy, "deploy_contract", _fake_deploy_contract)
+
+    asyncio.run(genlayer_deploy.deploy_prediction_contract(prediction_id))
+
+    prediction = asyncio.run(_get_prediction(prediction_id))
+    assert prediction.contract_address == _FAKE_ADDRESS
+    assert prediction.status_key == "open"
+
+
+def test_already_open_market_status_untouched_by_deploy(monkeypatch):
+    prediction_id = asyncio.run(
+        _create_prediction("https://genlayer.com/blog/mainnet", status_key="open")
+    )
+
+    async def _fake_deploy_contract(file, args):
+        return _FAKE_ADDRESS
+
+    monkeypatch.setattr(genlayer_deploy, "deploy_contract", _fake_deploy_contract)
+
+    asyncio.run(genlayer_deploy.deploy_prediction_contract(prediction_id))
+
+    prediction = asyncio.run(_get_prediction(prediction_id))
+    assert prediction.contract_address == _FAKE_ADDRESS
+    assert prediction.status_key == "open"
 
 
 def test_skips_already_linked_market(monkeypatch):

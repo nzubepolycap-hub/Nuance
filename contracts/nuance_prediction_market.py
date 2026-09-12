@@ -133,7 +133,21 @@ class NuancePredictionMarket(gl.Contract):
         resolution_url = self.resolution_url
 
         def leader_fn() -> dict:
-            web_data = gl.nondet.web.render(resolution_url, mode="text")
+            # FIXED 2026-09-11 — same bug, same fix as nuance_escrow.py's
+            # submit_deliverable (see that file's own note for the full
+            # account): gl.nondet.web.render() was CONFIRMED LIVE
+            # (2026-09-08) to reliably produce LEADER_TIMEOUT on Bradbury;
+            # nuance_dispute_court.py's add_evidence already carries the
+            # fix, this file never got it. gl.nondet.web.get() is the
+            # verified-working replacement — wrapped in try/except and
+            # truncated to 3000 chars for the same reasons: an
+            # unreachable/slow source page must not hang the whole
+            # resolution instead of just failing this attempt honestly.
+            try:
+                response = gl.nondet.web.get(resolution_url)
+                web_data = response.body.decode("utf-8", errors="replace")[:3000]
+            except Exception as exc:
+                web_data = f"(Resolution source URL was unreachable or timed out: {exc})"
 
             prompt = f"""You are resolving a binary prediction market.
 

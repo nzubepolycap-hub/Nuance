@@ -11,7 +11,7 @@ to every other importer.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -539,6 +539,58 @@ class PredictionPositionRead(BaseModel):
     payout: float | None = 0.0
     status: str = "PENDING"
     created_at: datetime
+
+
+class PredictionCreate(BaseModel):
+    """Body for POST /predictions — a real person authoring a real
+    market, replacing services/market_generator.py's tweet-scraping
+    pipeline as the actual way new markets get made (2026-09-12 rebrand:
+    the auto-generated questions were "Will this GenLayer claim hold
+    true: [raw tweet fragment]?" — incoherent, and every one required
+    GEMINI_API_KEY to even formulate). No LLM involved here — the
+    creator writes the question and criteria directly, so content is
+    sensible because a person wrote it.
+
+    resolution_source_url is REQUIRED, not optional like Prediction's own
+    column — this app now only creates markets that deploy a real
+    NuancePredictionMarket contract (routers/predictions.py's
+    create_prediction), and NuancePredictionMarket.resolve_market has
+    nothing to fetch/judge against without one; services/genlayer_deploy.
+    py's deploy_prediction_contract already skips deploy silently when
+    it's empty, which would leave this market permanently stuck off-chain
+    and unbettable under the on-chain-only policy this endpoint enforces.
+    """
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    title: str = Field(min_length=10, max_length=300)
+    description: str = Field(min_length=20, max_length=3000)
+    category: str = Field(min_length=1, max_length=60)
+    resolution_date: datetime
+    resolution_source_url: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("title")
+    @classmethod
+    def _title_is_a_question(cls, v: str) -> str:
+        if not v.rstrip().endswith("?"):
+            raise ValueError("title must be phrased as a yes/no question, ending in '?'.")
+        return v
+
+    @field_validator("resolution_source_url")
+    @classmethod
+    def _validate_resolution_source_url(cls, v: str) -> str:
+        v = v.strip()
+        if not (v.startswith("https://") or v.startswith("http://")):
+            raise ValueError("resolution_source_url must start with http:// or https://.")
+        return v
+
+    @field_validator("resolution_date")
+    @classmethod
+    def _resolution_date_in_future(cls, v: datetime) -> datetime:
+        deadline = v if v.tzinfo is not None else v.replace(tzinfo=timezone.utc)
+        if deadline <= datetime.now(timezone.utc):
+            raise ValueError("resolution_date must be in the future.")
+        return v
 
 
 class PredictionRead(BaseModel):
