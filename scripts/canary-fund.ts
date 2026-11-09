@@ -85,7 +85,7 @@ async function main() {
       functionName: "fund_escrow",
       args: [] as never,
       value: amountWei,
-      fees: { distribution },
+      fees: { distribution, feeValue: BigInt("100000000000010352") },
     })
   );
 

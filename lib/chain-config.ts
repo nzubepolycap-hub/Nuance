@@ -75,25 +75,23 @@ export function agentDirectoryContractAddress(): `0x${string}` | null {
 }
 
 /** The deployed NuanceEscrow instance backing a specific escrow, or null
- * if that escrow hasn't been linked to one. */
+ * if that escrow hasn't been linked to one. Per-agreement instance —
+ * never fall back to a global bootstrap contract address when null. */
 export function escrowContractAddress(
   escrow: { contract_address?: string | null } | null | undefined
 ): `0x${string}` | null {
-  const raw =
-    escrow?.contract_address?.trim() ||
-    process.env.NEXT_PUBLIC_ESCROW_CONTRACT_ADDRESS?.trim() ||
-    BRADBURY_ESCROW_ADDRESS;
+  const raw = escrow?.contract_address?.trim();
   return raw ? (raw as `0x${string}`) : null;
 }
 
-/** Same idea as escrowContractAddress, for NuancePredictionMarket. */
+/** Same idea as escrowContractAddress, for NuancePredictionMarket.
+ * Per-market instance — must return null for off-chain markets so the
+ * frontend routes them through the off-chain API instead of attempting
+ * an on-chain wallet transaction against the bootstrap test market. */
 export function predictionContractAddress(
   prediction: { contract_address?: string | null } | null | undefined
 ): `0x${string}` | null {
-  const raw =
-    prediction?.contract_address?.trim() ||
-    process.env.NEXT_PUBLIC_PREDICTION_MARKET_CONTRACT_ADDRESS?.trim() ||
-    BRADBURY_PREDICTION_MARKET_ADDRESS;
+  const raw = prediction?.contract_address?.trim();
   return raw ? (raw as `0x${string}`) : null;
 }
 

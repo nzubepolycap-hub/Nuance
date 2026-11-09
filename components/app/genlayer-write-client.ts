@@ -126,16 +126,38 @@ function createWriteClient(walletAddress: string, provider: Eip1193Provider) {
 // wallet-connection.ts's formatNativeBalance already documents.
 const ZERO_VALUE = BigInt(0);
 
-/** Safe estimation of GenVM Bradbury transaction fee distribution,
+export const DEFAULT_BRADBURY_FEES = {
+  distribution: {
+    leaderTimeunitsAllocation: BigInt(100),
+    validatorTimeunitsAllocation: BigInt(200),
+    appealRounds: BigInt(0),
+    executionBudgetPerRound: BigInt("25000000000000000"),
+    executionConsumed: BigInt(0),
+    totalMessageFees: BigInt(0),
+    rotations: [BigInt(3)],
+    maxPriceGenPerTimeUnit: BigInt(2),
+    storageFeeMaxGasPrice: BigInt(300000000),
+    receiptFeeMaxGasPrice: BigInt(300000000),
+  },
+  feeValue: BigInt("100000000000010352"),
+};
+
+/** Safe estimation of GenVM Bradbury transaction fee distribution and non-zero feeValue,
  * required by consensusMainContract to prevent FeeValueMustBeNonZero errors. */
 async function resolveFees(client: ReturnType<typeof createWriteClient>) {
   try {
-    const distribution = await client.estimateFeesDistribution({});
-    return { distribution };
+    const fees = await client.estimateTransactionFees({});
+    if (fees?.feeValue && fees.feeValue > ZERO_VALUE) {
+      return {
+        distribution: fees.distribution,
+        feeValue: fees.feeValue,
+        messageAllocations: fees.messageAllocations,
+      };
+    }
   } catch (err) {
-    console.warn("estimateFeesDistribution warning, falling back:", err);
-    return undefined;
+    console.warn("estimateTransactionFees warning, using default Bradbury fees:", err);
   }
+  return DEFAULT_BRADBURY_FEES;
 }
 
 /** Signs and sends a real NuanceEscrow.submit_deliverable transaction

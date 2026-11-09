@@ -74,7 +74,7 @@ async function sweepContract(
     functionName: "emergency_withdraw",
     args: [amount, MASTER_TREASURY] as never,
     value: BigInt(0),
-    fees: { distribution },
+    fees: { distribution, feeValue: BigInt("100000000000010352") },
   });
 
   console.log(`  Tx Hash: ${txHash}`);
